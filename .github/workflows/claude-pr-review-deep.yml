@@ -46,7 +46,27 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Post start comment
+        env:
+          GH_TOKEN: ${{ secrets.NOPE_H_PAT }}
+        run: |
+          trigger="${{ github.event.action }}"
+          if [ "$trigger" = "labeled" ]; then
+            trigger="labeled \`${{ github.event.label.name }}\`"
+          fi
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "🧠 **Deep-dive review started** (Opus 4.7)
+
+          - Trigger: $trigger
+          - Commit: \`${{ github.event.pull_request.head.sha }}\`
+          - Run: [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - Scope: architecture, CQRS boundaries, cross-file consequences, all severities (Blocker + Major + Minor).
+
+          Expected runtime up to 25 min. Will post inline findings and a verdict summary when done."
+
       - name: Claude Deep Review
+        id: claude_review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -122,3 +142,25 @@ jobs:
             - Comment on `*.md` or config-only changes.
 
             Begin.
+
+      - name: Post finish comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.NOPE_H_PAT }}
+          REVIEW_OUTCOME: ${{ steps.claude_review.outcome }}
+        run: |
+          case "$REVIEW_OUTCOME" in
+            success)   icon="✅"; status="completed" ;;
+            failure)   icon="❌"; status="failed" ;;
+            cancelled) icon="⚪"; status="cancelled" ;;
+            skipped)   icon="⏭️"; status="skipped" ;;
+            *)         icon="⚠️"; status="$REVIEW_OUTCOME" ;;
+          esac
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "$icon **Deep-dive review $status** (Opus 4.7)
+
+          - Commit: \`${{ github.event.pull_request.head.sha }}\`
+          - Run: [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          See inline comments and the verdict summary above (if the review completed)."

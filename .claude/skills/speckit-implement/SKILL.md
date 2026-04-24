@@ -89,6 +89,8 @@ You **MUST** consider the user input before proceeding (if not empty).
      - Display the table showing all checklists passed
      - Automatically proceed to step 3
 
+2a. **Resolve Trello card and post start comment**: Run `## Trello Integration` § A below before loading implementation context. If no card is resolvable, continue without blocking but record that Trello sync is disabled for this run.
+
 3. Load and analyze the implementation context:
    - **REQUIRED**: Read tasks.md for the complete task list and execution plan
    - **REQUIRED**: Read plan.md for tech stack, architecture, and file structure
@@ -168,6 +170,8 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Provide clear error messages with context for debugging
    - Suggest next steps if implementation cannot proceed
    - **IMPORTANT** For completed tasks, make sure to mark the task off as [X] in the tasks file.
+   - **Trello sync (per task)**: Immediately after marking a task `[X]` in tasks.md, run `## Trello Integration` § B (toggle matching checklist item to `complete` + post progress comment). If Trello sync is disabled for this run, skip silently.
+   - **Trello sync (mid-task)**: For long-running or multi-file tasks, post interim comments via `## Trello Integration` § B at meaningful checkpoints (file scaffolded, migration written, handler wired, tests passing). Keep each comment compact — one task per comment, bullets over prose.
 
 9. Completion validation:
    - Verify all required tasks are completed
@@ -175,6 +179,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Validate that tests pass and coverage meets requirements
    - Confirm the implementation follows the technical plan
    - Report final status with summary of completed work
+   - **Trello sync (final)**: Run `## Trello Integration` § C (post completion comment with branch name, commit SHAs, files touched, public surface added, follow-ups). Skip silently if Trello sync disabled.
 
 Note: This command assumes a complete task breakdown exists in tasks.md. If tasks are incomplete or missing, suggest running `/speckit.tasks` first to regenerate the task list.
 
@@ -207,3 +212,146 @@ Note: This command assumes a complete task breakdown exists in tasks.md. If task
         EXECUTE_COMMAND: {command}
         ```
     - If no hooks are registered or `.specify/extensions.yml` does not exist, skip silently
+
+## Trello Integration
+
+Purpose: mirror implementation progress on the Trello card originally referenced during `/speckit.specify`. Keep the card's checklists and comment stream authoritative so reviewers/stakeholders can follow progress without reading the repo.
+
+**Tools used** (Trello MCP):
+- `mcp__trello__set_active_board` / `mcp__trello__set_active_workspace` (only if card not reachable on default active board)
+- `mcp__trello__get_card`
+- `mcp__trello__get_checklist_items`
+- `mcp__trello__find_checklist_items_by_description`
+- `mcp__trello__update_checklist_item`
+- `mcp__trello__add_checklist_item` (only if a tasks.md item has no matching checklist entry and auto-create is enabled — see § D)
+- `mcp__trello__create_checklist` (same condition)
+- `mcp__trello__add_comment`
+
+Do **not** use Trello tools to move, archive, assign, or relabel the card. Progress sync is read-only w.r.t. card metadata; the only writes allowed are: toggle checklist items, add checklist items (with user opt-in), add comments.
+
+### § A — Resolve Trello card and post start comment
+
+1. **Resolve the card ID** in this order (first match wins):
+   a. `.specify/feature.json` → key `trello_card_id` (preferred; populated by `/speckit.specify` or manually).
+   b. `.specify/feature.json` → key `trello_card_url` → extract card ID from the URL shape `https://trello.com/c/<cardId>[/<slug>]`.
+   c. `SPEC_FILE` (spec.md) frontmatter: `trello_card_id:` or `trello_card_url:`.
+   d. First `https://trello.com/c/<id>` URL found in spec.md body.
+   e. If none of the above: ask the user once — "No Trello card linked to this feature. Paste card URL/ID to enable Trello sync, or type `skip` to proceed without it." If they type `skip`, set Trello sync to **disabled** for this run and continue. If they paste a URL/ID, persist it to `.specify/feature.json` under `trello_card_id` for future runs.
+2. **Verify reachability**: call `mcp__trello__get_card` with the resolved ID. If it fails (card not found, 401/403, active board mismatch):
+   - Try `mcp__trello__list_boards` → if the card's board is in the list, `mcp__trello__set_active_board` then re-try once.
+   - If still failing, warn the user with the exact error and set Trello sync to **disabled** for this run. Do not halt implementation.
+3. **Post the start comment** via `mcp__trello__add_comment`. Template:
+
+   ```
+   🤖 Implementation started — `/speckit.implement`
+
+   - Feature dir: <FEATURE_DIR relative to repo root>
+   - Branch: <current git branch>
+   - Spec: <SPEC_FILE>
+   - Tasks: <N total> (<S setup> / <T tests> / <C core> / <I integration> / <P polish>)
+   - Started at: <ISO-8601 timestamp, UTC>
+
+   Will toggle checklist items and post progress comments as phases complete.
+   ```
+
+4. Store the resolved `trello_card_id` in memory for this run so §§ B and C can reuse it without re-resolving.
+
+### § B — Toggle checklist item + post progress comment (per task)
+
+Run after marking a task `[X]` in tasks.md, and for mid-task checkpoints on long tasks.
+
+1. **Match the tasks.md item to a Trello checklist item**:
+   - Load checklists via `mcp__trello__get_card` (with `includeChecklists: true` if supported) or `mcp__trello__get_checklist_items`.
+   - Match on task ID prefix first (e.g. `T042`), then on exact task description, then on normalized substring (lowercase, whitespace-collapsed).
+   - If multiple candidates match, prefer the one whose checklist name equals the tasks.md phase (e.g. "Core", "Tests").
+2. **If no match**:
+   - If auto-create is enabled (§ D), call `mcp__trello__add_checklist_item` under the checklist named after the task's phase; create the checklist first via `mcp__trello__create_checklist` if missing. Then proceed to toggle.
+   - If auto-create is disabled, skip toggle and note the miss in the progress comment body.
+3. **Toggle to complete**: `mcp__trello__update_checklist_item` with state `complete` (exact field name per the MCP tool schema — `state: "complete"` or `checked: true`, whichever the tool accepts). Never toggle an item back to incomplete except to correct a sync error.
+4. **Post the progress comment**. Choose template by checkpoint type:
+
+   **Task complete:**
+   ```
+   ✅ <T0XX> <task description> — done
+
+   - Files: `path/a.cs`, `path/b.cs`
+   - Key additions: `Namespace.ClassName.MethodName(...)`, handler `CreateEmployeeCommandHandler`, validator `CreateEmployeeValidator`
+   - Variables/config: `appsettings.json:ConnectionStrings:StaffDb`
+   - Commit: `<short SHA>` "<commit subject>"  (or "not yet committed" if deferred)
+   - Next: T0XX+1 <next task description>
+   ```
+
+   **Mid-task update** (e.g. migration written but handler pending):
+   ```
+   🔧 <T0XX> <task description> — in progress
+
+   - Done: migration `20260423_AddEmployeeTable.sql`, repository `EmployeeReadRepository.ListAsync`
+   - Pending: handler wiring, endpoint mapping
+   - Files touched so far: `...`
+   ```
+
+   **Task blocked/failed:**
+   ```
+   ⚠️ <T0XX> <task description> — blocked
+
+   - Error: <short quote of the actual error message>
+   - Root cause: <one-line hypothesis>
+   - Next action: <what will unblock it>
+   ```
+
+5. Omit sections that are empty. Keep comments compact — bullets over prose. Quote file paths with backticks. Never paste secrets, connection strings with credentials, or PII into comments.
+
+### § C — Completion comment
+
+Post once, after all tasks are `[X]` and completion validation passes. Template:
+
+```
+🎉 Implementation complete — <feature short name>
+
+- Branch: `<branch name>`
+- Commits (in order):
+  - `<sha1>` — <subject>
+  - `<sha2>` — <subject>
+- Tasks: <N>/<N> complete
+- Files added: <count>, modified: <count>, deleted: <count>
+  - Added: `path/x.cs`, `path/y.sql`, ...
+  - Modified: `path/z.cs`, ...
+- Public surface added:
+  - Endpoints: `POST /api/employees`, `GET /api/employees/{id}`
+  - Handlers: `CreateEmployeeCommandHandler`, `GetEmployeeByIdQueryHandler`
+  - Migrations: `20260423_AddEmployeeTable.sql`
+- Tests: <unit passed>/<unit total>, <integration passed>/<integration total>
+- Follow-ups (if any): <short bullets, or "none">
+- Ready for: `/speckit.analyze`, PR to `main`
+```
+
+Gather the data with plain shell/git commands before composing the comment:
+- `git rev-parse --abbrev-ref HEAD` → branch
+- `git log --oneline <merge-base>..HEAD` → commits since feature branch diverged
+- `git diff --name-status <merge-base>..HEAD` → files added/modified/deleted
+- Cross-reference with tasks.md and plan.md to label public surface accurately
+
+### § D — Optional config
+
+Read `.specify/trello-sync.json` if present. Recognized keys (all optional):
+
+```json
+{
+  "enabled": true,
+  "auto_create_checklist_items": false,
+  "mid_task_checkpoints": true,
+  "comment_style": "bullets",
+  "redact_paths_matching": ["secrets/", ".env"]
+}
+```
+
+- `enabled: false` → skip Trello sync entirely for this run, regardless of card resolution.
+- `auto_create_checklist_items` defaults to `false` — do not silently create checklist items on the card unless explicitly enabled.
+- `mid_task_checkpoints` defaults to `true`. Set to `false` to only comment at task completion.
+- `redact_paths_matching` — substrings; any file path containing one of these is replaced with `<redacted>` in comments.
+
+### § E — Failure handling
+
+- Any Trello MCP call failure → log a single warning line, continue implementation. Never halt the implementation loop because of Trello sync issues.
+- Do not retry more than once per call. Do not loop on transient failures.
+- If >3 consecutive Trello calls fail in a single run, set Trello sync to **disabled** for the remainder of the run and surface a summary warning in the final user-facing report.
