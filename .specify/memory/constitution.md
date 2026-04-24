@@ -233,7 +233,7 @@ These patterns are derived from the reference validator `CreateCargoDayCommandVa
         }
 
         private static bool BeWithinBusinessRange(DateTime hireDate) =>
-            hireDate >= new DateTime(1900, 1, 1) && hireDate <= DateTime.UtcNow.Date;
+            hireDate >= new DateTime(1900, 1, 1) && hireDate <= BusinessTime.Today();
     }
     ```
 
