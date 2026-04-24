@@ -42,7 +42,22 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Post start comment
+        env:
+          GH_TOKEN: ${{ secrets.NOPE_H_PAT }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "🔍 **Fast-lane review started** (Haiku 4.5)
+
+          - Commit: \`${{ github.event.pull_request.head.sha }}\`
+          - Run: [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - Scope: Blockers + high-confidence Majors only.
+
+          Will post findings inline and a verdict summary when done."
+
       - name: Claude Fast Review
+        id: claude_review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -122,3 +137,25 @@ jobs:
             - Comment on untouched files.
 
             Begin.
+
+      - name: Post finish comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.NOPE_H_PAT }}
+          REVIEW_OUTCOME: ${{ steps.claude_review.outcome }}
+        run: |
+          case "$REVIEW_OUTCOME" in
+            success)   icon="✅"; status="completed" ;;
+            failure)   icon="❌"; status="failed" ;;
+            cancelled) icon="⚪"; status="cancelled" ;;
+            skipped)   icon="⏭️"; status="skipped" ;;
+            *)         icon="⚠️"; status="$REVIEW_OUTCOME" ;;
+          esac
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "$icon **Fast-lane review $status** (Haiku 4.5)
+
+          - Commit: \`${{ github.event.pull_request.head.sha }}\`
+          - Run: [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          See inline comments and the verdict summary above (if the review completed)."
