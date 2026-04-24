@@ -1,0 +1,11 @@
+{
+  "name": "thoughtboat/copilot-skills-that-work",
+  "version": "94e070f86930b39e6e706f622c336a84cff7057a",
+  "summary": "Auto-generated tile from GitHub (1 skill)",
+  "private": true,
+  "skills": {
+    "dotnet-standards-enforcer": {
+      "path": "dotnet-standards-enforcer/SKILL.md"
+    }
+  }
+}
