@@ -1,0 +1,124 @@
+name: Claude PR Review — Fast Lane (Haiku)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - "**/*.md"
+      - ".qodo/**"
+      - ".specify/**"
+      - ".claude/**"
+      - ".agents/**"
+      - ".codex/**"
+      - ".gemini/**"
+      - "docs/**"
+      - ".editorconfig"
+      - ".gitignore"
+      - ".gitattributes"
+      - "LICENSE"
+      - "**/*.png"
+      - "**/*.jpg"
+      - "**/*.svg"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: claude-review-fast-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fast-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Claude Fast Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--model claude-haiku-4-5-20251001"
+          allowed_tools: "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(cat:*),Bash(rg:*)"
+          direct_prompt: |
+            You are the **fast-lane reviewer** for PR #${{ github.event.pull_request.number }} in the `staffsync` backend.
+
+            Goal: fast triage on every push. Catch clear Blockers and high-confidence Majors only. Stay out of the way otherwise.
+
+            ## Required reading (read, don't guess)
+
+            1. `REVIEW.md` — severity ladder.
+            2. `.qodo/rules/11-review-priorities.md` — what's Blocker, Major, Minor.
+            3. Skim `.qodo/rules/*.md` only when you need to cite a specific rule.
+
+            Constitution (`.specify/memory/constitution.md`) is authoritative but too long for a fast pass — read specific sections only when citing.
+
+            ## Scope
+
+            - Inspect the diff via `git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`.
+            - Review only touched files.
+            - Skip generated code (`*.Designer.cs`, `*.g.cs`, `obj/**`, `bin/**`, `TestResults/**`).
+
+            ## What to flag (HIGH CONFIDENCE ONLY)
+
+            - SQL injection — interpolated SQL, unwhitelisted `ORDER BY`.
+            - EF Core imports in persistence.
+            - `DbContext`, `Microsoft.EntityFrameworkCore.*` usage.
+            - Frontend code (`.tsx`, `package.json`, React/Next imports).
+            - Raw PII in logs (`_logger.LogInformation($"...{phone}...")`, full request body at Info+).
+            - Controller calling repository / `IDbConnection` / SQL directly.
+            - `TargetFramework` not `net10.0`.
+            - `.csproj` missing `TreatWarningsAsErrors` or `Nullable=enable`.
+            - Handler calling `validator.Validate(...)` manually.
+            - `async void` outside event handler.
+            - `.Result`, `.Wait()`, `.GetAwaiter().GetResult()`.
+            - `throw ex;` (rethrow destroys stack).
+            - `try { ... } catch (Exception)` in a handler.
+            - Route/body ID silently overridden.
+
+            ## What to SKIP on fast lane
+
+            - Minor naming nits.
+            - Style preferences.
+            - Architectural refactor suggestions.
+            - Test coverage commentary.
+            - Missing `CancellationToken` on private methods (flag only on public async).
+            - Anything requiring deep reasoning or cross-file context — leave those for the deep-review lane.
+
+            ## Comment format
+
+            - One inline comment per finding.
+            - First line: `**Blocker** — <one-line>` or `**Major** — <one-line>`.
+            - Cite: `.qodo/rules/NN-*.md` + constitution § if obvious.
+            - Include a ```suggestion block when the fix is inline.
+
+            ## Summary (post once, top of review)
+
+            ```
+            ### Fast-lane verdict: <Approve | Request Changes | Comment>
+
+            - Blockers: <N>
+            - Majors: <N>
+
+            Deep review (`@claude review` comment or mark PR ready-for-review) runs the full Opus pass.
+            ```
+
+            If zero findings, post only: `Fast-lane clean. Mark PR ready-for-review for deep Opus review.` — do not add filler.
+
+            ## Never
+
+            - Flag Minors.
+            - Block on style/formatting.
+            - Suggest refactors.
+            - Duplicate findings across files.
+            - Comment on untouched files.
+
+            Begin.

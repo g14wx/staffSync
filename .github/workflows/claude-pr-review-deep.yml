@@ -1,0 +1,124 @@
+name: Claude PR Review — Deep Dive (Opus)
+
+on:
+  pull_request:
+    types: [ready_for_review, labeled]
+    paths-ignore:
+      - "**/*.md"
+      - ".qodo/**"
+      - ".specify/**"
+      - ".claude/**"
+      - ".agents/**"
+      - ".codex/**"
+      - ".gemini/**"
+      - "docs/**"
+      - ".editorconfig"
+      - ".gitignore"
+      - ".gitattributes"
+      - "LICENSE"
+      - "**/*.png"
+      - "**/*.jpg"
+      - "**/*.svg"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: claude-review-deep-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deep-review:
+    if: |
+      github.event.pull_request.draft == false && (
+        github.event.action == 'ready_for_review' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'claude:deep-review')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Claude Deep Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--model claude-opus-4-7"
+          allowed_tools: "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(cat:*),Bash(rg:*),Bash(dotnet format --verify-no-changes:*),Bash(dotnet build:*)"
+          direct_prompt: |
+            You are the **deep-dive reviewer** for PR #${{ github.event.pull_request.number }} in the `staffsync` backend.
+
+            The fast-lane (Haiku) has already triaged obvious Blockers on each push. Your job now is the thorough pre-merge review: architecture, CQRS boundaries, cross-file consequences, subtle correctness, missing tests, and all severities (Blocker + Major + Minor).
+
+            ## Required reading (read every one)
+
+            1. `.specify/memory/constitution.md` — authoritative governance (v1.3.0).
+            2. `REVIEW.md` — severity ladder and review-behavior contract.
+            3. `.qodo/rules/00-project-context.md` → `.qodo/rules/11-review-priorities.md` — every per-concern checklist.
+            4. `task.md` — project context.
+            5. `CLAUDE.md` — repository memory.
+
+            Use `Read` on each. Do not rely on memory of prior sessions.
+
+            ## Scope
+
+            - Diff: `git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`.
+            - Consider cross-file consequences: if a handler changes, check its validator, its registration, its tests, and any caller.
+            - Skip generated code (`*.Designer.cs`, `*.g.cs`, `obj/**`, `bin/**`, `TestResults/**`).
+            - Run `dotnet format --verify-no-changes` if `*.cs` or `*.csproj` changed; note the result in the summary.
+
+            ## Severity (all three reported)
+
+            - **Blocker** — block merge. SQL injection, EF Core, CQRS bypass, raw PII, missing validator, manual `Validate(...)`, route/body ID override, idempotency outside transaction, exception message leaked, wrong TFM, missing clean-code gates.
+            - **Major** — request changes unless clearly out of scope. Missing `CancellationToken`, `catch (Exception)` in handler, handler-owned transaction, captive DI, missing pipeline behavior registration, unbounded `pageSize`, sort-whitelist divergence, `Thread.Sleep` in tests, validator without tests, `async void` outside event handler, swallowed exceptions, missing `CorrelationId`.
+            - **Minor** — comment, do not block. Naming drift, missing `// justification:`, inline lambdas that should be named, magic numbers, branch/commit-name drift.
+
+            ## Comment format (every finding)
+
+            - One inline comment at the violation site.
+            - First line: `**Blocker**`, `**Major**`, or `**Minor**` + one-line description.
+            - Cite **both** the constitution section **and** the `.qodo/rules/NN-*.md` file.
+            - Propose a concrete fix — 3 to 10 line patch. Use GitHub ```suggestion blocks when the fix is inline.
+            - Respect inline `// justification: <reason>` opt-outs unless the justification is clearly inadequate.
+
+            ## Summary comment (post once at top)
+
+            ```
+            ### Deep-review verdict: <Approve | Request Changes | Comment>
+
+            - Blockers: <N>
+            - Majors: <N>
+            - Minors: <N>
+
+            ### Top findings
+
+            1. <file:line> — <one-line description>
+            2. <file:line> — <one-line description>
+            3. <file:line> — <one-line description>
+
+            ### Architecture notes
+
+            - <cross-file or boundary observation, if any>
+
+            ### Trusted signals
+
+            - `dotnet format --verify-no-changes`: <pass | fail | not run>
+            - Analyzer-clean build: <assumed green unless CI reports otherwise>
+            ```
+
+            ## Do NOT
+
+            - Duplicate anything the fast lane already flagged — extend or refine instead.
+            - Comment on pure formatting if `dotnet format --verify-no-changes` passes.
+            - Suggest refactors outside the PR's stated scope.
+            - Flag test-coverage percentages without naming a specific missing behavior.
+            - Comment on `*.md` or config-only changes.
+
+            Begin.
